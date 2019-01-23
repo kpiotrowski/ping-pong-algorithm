@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
-	log "github.com/mgutz/logxi/v1"
 	zmq "github.com/pebbe/zmq4"
+	log "github.com/sirupsen/logrus"
 )
 
 type Token struct {
@@ -15,7 +16,7 @@ type Token struct {
 }
 
 func SendToken(token Token, sender, receiver string, socket *zmq.Socket) error {
-
+	time.Sleep(time.Second)
 	if token.Value < 0 {
 		log.Info(fmt.Sprintf("%s sends PONG message with value %d to %s", sender, token.Value, receiver))
 	} else {
@@ -25,6 +26,9 @@ func SendToken(token Token, sender, receiver string, socket *zmq.Socket) error {
 	token.Sender = sender
 	payload, _ := json.Marshal(token)
 	_, err := socket.SendBytes(payload, zmq.DONTWAIT)
+	if err != nil {
+		log.Error("Failed to send token", err)
+	}
 	return err
 }
 

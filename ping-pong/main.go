@@ -43,10 +43,10 @@ type node struct {
 	msgChannel     chan token.Token
 	pingToken      *token.Token
 	pongToken      *token.Token
-
-	CSbusy    bool
-	CSChannel chan bool
-	wantsCS   bool
+	round          int
+	CSbusy         bool
+	CSChannel      chan bool
+	wantsCS        bool
 }
 
 func newNode(nodeAddr, nextAddr string) (*node, error) {
@@ -56,6 +56,9 @@ func newNode(nodeAddr, nextAddr string) (*node, error) {
 		nextNodeAddr: nextAddr,
 		msgChannel:   make(chan token.Token),
 		CSChannel:    make(chan bool),
+		CSbusy:       false,
+		wantsCS:      false,
+		round:        0,
 	}
 	var err error
 	n.nextNodeScoket, err = zmq.NewSocket(zmq.PUSH)
@@ -69,6 +72,7 @@ func newNode(nodeAddr, nextAddr string) (*node, error) {
 
 func (n *node) Run() {
 	go token.Listen(n.msgChannel, n.nodeAddr)
+	go n.triggerWantsCS()
 	if *generateToken {
 		n.sendFirstToken()
 	}
@@ -76,22 +80,30 @@ func (n *node) Run() {
 	for {
 		select {
 		case _ = <-n.CSChannel:
-			log.Info(fmt.Sprintf("%s leaves Critical section", n.nodeAddr))
+			log.Warn(fmt.Sprintf("%s leaves Critical section", n.nodeAddr))
 			n.CSbusy = false
 			if n.pingToken != nil && n.pongToken != nil {
 				n.incarnate(n.pingToken.Value)
 			}
 			n.forward()
+			go n.triggerWantsCS()
 		case t := <-n.msgChannel:
+			if t.Value < 0 {
+				n.pongToken = &t
+			} else {
+				n.pingToken = &t
+			}
 			if t.Value == n.lastToken {
 				n.regenerate(t.Value)
 			}
+			n.lastToken = t.Value
 			if !n.CSbusy {
 				if n.wantsCS && t.Value > 0 {
-					log.Info(fmt.Sprintf("%s enters Critical section", n.nodeAddr))
+					log.Warn(fmt.Sprintf("%s enters Critical section", n.nodeAddr))
 					n.CSbusy = true
+					n.wantsCS = false
 					go func() {
-						time.Sleep(time.Second * 10)
+						time.Sleep(time.Second * 5)
 						n.CSChannel <- true
 					}()
 				} else {
@@ -110,9 +122,9 @@ func (n *node) sendFirstToken() {
 
 func (n *node) regenerate(value int) {
 	if value < 0 {
-		log.Warn("PONG token is lost, regenerating it")
-	} else {
 		log.Warn("PING token is lost, regenerating it")
+	} else {
+		log.Warn("PONG token is lost, regenerating it")
 	}
 	log.Warn("Regenerating token")
 	n.pingToken = &token.Token{Value: int(math.Abs(float64(value)))}
@@ -132,17 +144,32 @@ func (n *node) forward() {
 	if n.pongToken != nil {
 		n.forwardPong()
 	}
+
 }
 
 func (n *node) forwardPing() {
-	log.Info("X")
 	n.lastToken = n.pingToken.Value
-	token.SendToken(*n.pingToken, n.nodeAddr, n.nextNodeAddr, n.nextNodeScoket)
+	if n.round == *losePingRound && *losePingRound > 0 {
+		log.Error("Ommiting PING send - PING token is lost")
+	} else {
+		token.SendToken(*n.pingToken, n.nodeAddr, n.nextNodeAddr, n.nextNodeScoket)
+	}
 	n.pingToken = nil
+	n.round++
 }
 
 func (n *node) forwardPong() {
 	n.lastToken = n.pongToken.Value
-	token.SendToken(*n.pongToken, n.nodeAddr, n.nextNodeAddr, n.nextNodeScoket)
-	n.pingToken = nil
+	if n.round == *losePongRound && *losePongRound > 0 {
+		log.Error("Ommiting POST send - PONG token is lost")
+	} else {
+		token.SendToken(*n.pongToken, n.nodeAddr, n.nextNodeAddr, n.nextNodeScoket)
+	}
+	n.pongToken = nil
+}
+
+func (n *node) triggerWantsCS() {
+	time.Sleep(time.Second * 30)
+	n.wantsCS = true
+	log.Warn("Wants to enter CS")
 }
